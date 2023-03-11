@@ -18,7 +18,7 @@
 #include <gtsam/nonlinear/ISAM2.h>
 
 using namespace gtsam;
-
+using PointTypeN = pcl::PointXYZINormal;
 using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
 using symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
 using symbol_shorthand::B; // Bias  (ax,ay,az,gx,gy,gz)
@@ -303,6 +303,35 @@ public:
         }
         return cloudOut;
     }
+    pcl::PointCloud<PointTypeN>::Ptr transformPointCloudNormal(pcl::PointCloud<PointType>::Ptr cloudIn, PointTypePose* transformIn) {
+      pcl::PointCloud<PointTypeN>::Ptr cloudOut(new pcl::PointCloud<PointTypeN>());
+      int cloudSize = cloudIn->size();
+      cloudOut->reserve(cloudSize);
+
+      Eigen::Affine3f transCur = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, transformIn->roll, transformIn->pitch, transformIn->yaw);
+      Eigen::Vector3f origin = transCur.matrix().block(0,0,3,1);
+
+      for(auto pointFrom : cloudIn->points) {
+        PointTypeN normal_point;
+        Eigen::Vector3f epoint(pointFrom.x, pointFrom.y, pointFrom.z);
+        Eigen::Vector3f normal = origin - epoint;
+        normal.x() = transCur(0,0) * normal.x() + transCur(0,1) * normal.y() + transCur(0,2) * normal.z() + transCur(0,3);
+        normal.y() = transCur(1,0) * normal.x() + transCur(1,1) * normal.y() + transCur(1,2) * normal.z() + transCur(1,3);
+        normal.z() = transCur(2,0) * normal.x() + transCur(2,1) * normal.y() + transCur(2,2) * normal.z() + transCur(2,3);        
+        normal.normalize();
+
+        normal_point.x = transCur(0,0) * pointFrom.x + transCur(0,1) * pointFrom.y + transCur(0,2) * pointFrom.z + transCur(0,3);
+        normal_point.y = transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3);
+        normal_point.z = transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3);
+        normal_point.intensity = pointFrom.intensity;
+        normal_point.normal_x = normal.x();
+        normal_point.normal_y = normal.y();
+        normal_point.normal_z = normal.z();  
+        cloudOut->emplace_back(normal_point);      
+      }
+      return cloudOut;
+    }
+
 
     gtsam::Pose3 pclPointTogtsamPose3(PointTypePose thisPoint)
     {
@@ -339,21 +368,9 @@ public:
     }
 
     
-
-
-
-
-
-
-
-
-
-
-
-
-
     bool saveMapService(lio_sam::save_mapRequest& req, lio_sam::save_mapResponse& res)
     {
+      
       string saveMapDirectory;
 
       cout << "****************************************************" << endl;
@@ -365,48 +382,63 @@ public:
       int unused = system((std::string("exec rm -r ") + saveMapDirectory).c_str());
       unused = system((std::string("mkdir -p ") + saveMapDirectory).c_str());
       // save key frame transformations
-      pcl::io::savePCDFileBinary(saveMapDirectory + "/trajectory.pcd", *cloudKeyPoses3D);
-      pcl::io::savePCDFileBinary(saveMapDirectory + "/transformations.pcd", *cloudKeyPoses6D);
+    //   pcl::io::savePCDFileBinary(saveMapDirectory + "/trajectory.pcd", *cloudKeyPoses3D);
+    //   pcl::io::savePCDFileBinary(saveMapDirectory + "/transformations.pcd", *cloudKeyPoses6D);
       // extract global point cloud map
+      pcl::PointCloud<PointTypeN>::Ptr globalNormalCloud(new pcl::PointCloud<PointTypeN>());
       pcl::PointCloud<PointType>::Ptr globalCornerCloud(new pcl::PointCloud<PointType>());
       pcl::PointCloud<PointType>::Ptr globalCornerCloudDS(new pcl::PointCloud<PointType>());
       pcl::PointCloud<PointType>::Ptr globalSurfCloud(new pcl::PointCloud<PointType>());
       pcl::PointCloud<PointType>::Ptr globalSurfCloudDS(new pcl::PointCloud<PointType>());
       pcl::PointCloud<PointType>::Ptr globalMapCloud(new pcl::PointCloud<PointType>());
       for (int i = 0; i < (int)cloudKeyPoses3D->size(); i++) {
-          *globalCornerCloud += *transformPointCloud(cornerCloudKeyFrames[i],  &cloudKeyPoses6D->points[i]);
-          *globalSurfCloud   += *transformPointCloud(surfCloudKeyFrames[i],    &cloudKeyPoses6D->points[i]);
+		      *globalNormalCloud += *transformPointCloudNormal(cornerCloudKeyFrames[i],  &cloudKeyPoses6D->points[i]);
+		      *globalNormalCloud += *transformPointCloudNormal(surfCloudKeyFrames[i],    &cloudKeyPoses6D->points[i]);
+
+          // *globalCornerCloud += *transformPointCloud(cornerCloudKeyFrames[i],  &cloudKeyPoses6D->points[i]);
+          // *globalSurfCloud += *transformPointCloud(surfCloudKeyFrames[i],    &cloudKeyPoses6D->points[i]);
           cout << "\r" << std::flush << "Processing feature cloud " << i << " of " << cloudKeyPoses6D->size() << " ...";
       }
+    	ofstream outposefile(saveMapDirectory+"/trajectory.txt", ios::trunc);
+    	outposefile << "# index, camera pose(qw, qx, qy, qz, tx, ty, tz)"<<std::endl;
+    	for(int32_t i = 0;i<cloudKeyPoses6D->points.size();i++) {
+    	    tf::Quaternion quat;
+    	    quat.setRPY(cloudKeyPoses6D->points[i].yaw,
+    	                -cloudKeyPoses6D->points[i].roll,
+    	                cloudKeyPoses6D->points[i].pitch);
+    	    quat.normalize();
+    	    outposefile <<  std::to_string(cloudKeyPoses6D->points[i].time) << " " << quat.w()<< " " << quat.x()<< " " << quat.y() << " " << quat.z()<< " "
+    	                            << cloudKeyPoses6D->points[i].z << " " << cloudKeyPoses6D->points[i].x << " " << cloudKeyPoses6D->points[i].y<< std::endl;
+    	}    
+    	outposefile.close();
+    //   if(req.resolution != 0)
+    //   {
+    //     cout << "\n\nSave resolution: " << req.resolution << endl;
 
-      if(req.resolution != 0)
-      {
-        cout << "\n\nSave resolution: " << req.resolution << endl;
-
-        // down-sample and save corner cloud
-        downSizeFilterCorner.setInputCloud(globalCornerCloud);
-        downSizeFilterCorner.setLeafSize(req.resolution, req.resolution, req.resolution);
-        downSizeFilterCorner.filter(*globalCornerCloudDS);
-        pcl::io::savePCDFileBinary(saveMapDirectory + "/CornerMap.pcd", *globalCornerCloudDS);
-        // down-sample and save surf cloud
-        downSizeFilterSurf.setInputCloud(globalSurfCloud);
-        downSizeFilterSurf.setLeafSize(req.resolution, req.resolution, req.resolution);
-        downSizeFilterSurf.filter(*globalSurfCloudDS);
-        pcl::io::savePCDFileBinary(saveMapDirectory + "/SurfMap.pcd", *globalSurfCloudDS);
-      }
-      else
-      {
-        // save corner cloud
-        pcl::io::savePCDFileBinary(saveMapDirectory + "/CornerMap.pcd", *globalCornerCloud);
-        // save surf cloud
-        pcl::io::savePCDFileBinary(saveMapDirectory + "/SurfMap.pcd", *globalSurfCloud);
-      }
+    //     // down-sample and save corner cloud
+    //     downSizeFilterCorner.setInputCloud(globalCornerCloud);
+    //     downSizeFilterCorner.setLeafSize(req.resolution, req.resolution, req.resolution);
+    //     downSizeFilterCorner.filter(*globalCornerCloudDS);
+    //     pcl::io::savePCDFileBinary(saveMapDirectory + "/CornerMap.pcd", *globalCornerCloudDS);
+    //     // down-sample and save surf cloud
+    //     downSizeFilterSurf.setInputCloud(globalSurfCloud);
+    //     downSizeFilterSurf.setLeafSize(req.resolution, req.resolution, req.resolution);
+    //     downSizeFilterSurf.filter(*globalSurfCloudDS);
+    //     pcl::io::savePCDFileBinary(saveMapDirectory + "/SurfMap.pcd", *globalSurfCloudDS);
+    //   }
+    //   else
+    //   {
+    //     // save corner cloud
+    //     pcl::io::savePCDFileBinary(saveMapDirectory + "/CornerMap.pcd", *globalCornerCloud);
+    //     // save surf cloud
+    //     pcl::io::savePCDFileBinary(saveMapDirectory + "/SurfMap.pcd", *globalSurfCloud);
+    //   }
 
       // save global point cloud map
-      *globalMapCloud += *globalCornerCloud;
-      *globalMapCloud += *globalSurfCloud;
+      // *globalMapCloud += *globalCornerCloud;
+      // *globalMapCloud += *globalSurfCloud;
 
-      int ret = pcl::io::savePCDFileBinary(saveMapDirectory + "/GlobalMap.pcd", *globalMapCloud);
+      int ret = pcl::io::savePLYFileASCII(saveMapDirectory + "/GlobalMap.ply", *globalNormalCloud);
       res.success = ret == 0;
 
       downSizeFilterCorner.setLeafSize(mappingCornerLeafSize, mappingCornerLeafSize, mappingCornerLeafSize);
@@ -1362,18 +1394,18 @@ public:
                 return true;
         }
 
-        Eigen::Affine3f transStart = pclPointToAffine3f(cloudKeyPoses6D->back());
-        Eigen::Affine3f transFinal = pcl::getTransformation(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
-                                                            transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
-        Eigen::Affine3f transBetween = transStart.inverse() * transFinal;
-        float x, y, z, roll, pitch, yaw;
-        pcl::getTranslationAndEulerAngles(transBetween, x, y, z, roll, pitch, yaw);
+        // Eigen::Affine3f transStart = pclPointToAffine3f(cloudKeyPoses6D->back());
+        // Eigen::Affine3f transFinal = pcl::getTransformation(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
+        //                                                     transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
+        // Eigen::Affine3f transBetween = transStart.inverse() * transFinal;
+        // float x, y, z, roll, pitch, yaw;
+        // pcl::getTranslationAndEulerAngles(transBetween, x, y, z, roll, pitch, yaw);
 
-        if (abs(roll)  < surroundingkeyframeAddingAngleThreshold &&
-            abs(pitch) < surroundingkeyframeAddingAngleThreshold && 
-            abs(yaw)   < surroundingkeyframeAddingAngleThreshold &&
-            sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold)
-            return false;
+        // if (abs(roll)  < surroundingkeyframeAddingAngleThreshold &&
+        //     abs(pitch) < surroundingkeyframeAddingAngleThreshold && 
+        //     abs(yaw)   < surroundingkeyframeAddingAngleThreshold &&
+        //     sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold)
+        //     return false;
 
         return true;
     }
